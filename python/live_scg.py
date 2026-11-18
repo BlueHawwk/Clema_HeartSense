@@ -51,7 +51,7 @@ from scipy.signal import butter, sosfilt, sosfilt_zi
 
 # ----------------------------- USTAWIENIA -----------------------------
 
-PORT = "COM5"
+PORT = "COM7"
 BAUD = 921600
 FS = 500
 

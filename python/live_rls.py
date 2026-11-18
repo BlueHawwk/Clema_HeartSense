@@ -40,7 +40,7 @@ def uniform_filter1d(x, size):
     return (c[size:] - c[:-size]) / size
 
 # ----------------------------------------------------------------- settings
-PORT, BAUD = "COM5", 921600
+PORT, BAUD = "COM7", 921600
 FS = 500
 BAND = (5.0, 25.0)            # SCG band, Hz
 WIN = 10 * FS                 # analysis window

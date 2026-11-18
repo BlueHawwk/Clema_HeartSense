@@ -78,7 +78,7 @@ py live\_scg.py
 ```
 
 * Close the Arduino Serial Monitor first, only one program can use the COM port.
-* Set `PORT` (default `COM5`) and `BAUD` (default `921600`) at the top of `live\_scg.py`.
+* Set `PORT` (default `COM7`) and `BAUD` (default `921600`) at the top of `live\_scg.py`.
 * Sensor roles are the same as in the firmware: C = chest, D = device, B = back (`CHEST\_SENSOR\_INDEX = 0`, `REF\_SENSOR\_INDICES = (1, 2)`). They only affect the plots and RLS; the heart rate uses all 9 axes.
 * The window shows (1) chest raw vs RLS-cleaned, 5-25 Hz, view only, and (2) the signal the heart rate is computed from: chest 20-60 Hz and its energy envelope. The heart rate is the rhythm of the envelope bumps.
 * Replay a log: `py live\_scg.py log\_scg\_YYYYMMDD\_HHMMSS.csv` (prints heart rate once per second).
