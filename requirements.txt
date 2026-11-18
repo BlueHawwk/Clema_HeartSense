@@ -1,0 +1,6 @@
+numpy
+scipy
+pyserial
+pyqtgraph
+PyQt5
+pandas        # only for replaying recordings

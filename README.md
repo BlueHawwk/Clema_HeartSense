@@ -13,7 +13,15 @@ and subtracts the motion they see from the chest signal with an adaptive filter.
 
 * At rest: heart rate matches a Polar H10 chest strap.
 * Moving: cancellation removes most of the motion in the signal, but the heart rate is not yet reliable in every movement. Local motion that only the chest feels (muscles, strap shake) cannot be cancelled by reference sensors.
-* The tracker so far has been tested on simulated data and informal runs, not on a proper dataset. Contributions with recordings plus reference heart rates are very welcome.
+* `live\_scg.py` (autocorrelation + HMM tracker) on the recordings in `raw\_data from accelerometers`, compared with the Polar H10:
+
+|Recording|`live\_rls.py` (old)|`live\_scg.py`|
+|-|-|-|
+|walking 5 min|24.8 bpm mean error, 12% of seconds within 5 bpm|**3.3 bpm, 87%** (3.1 bpm, 92% after the first minute)|
+|sitting 5 min|2.1 bpm, 94%|**1.5 bpm, 99%**|
+|standing 5 min|-|**1.7 bpm, 99%**|
+
+  The old estimator locked onto the walking rhythm (about 50/min). Only one walking recording with a reference exists so far and the heart rate in it is nearly constant (88 ± 3.5 bpm), so fast heart-rate changes are not tested yet. Recordings with a Polar reference and a changing rate (stairs, faster walking) are very welcome.
 
 ## Hardware
 
@@ -38,8 +46,10 @@ If a sensor misbehaves, use shorter wires or lower the I2C clock in the firmware
 
 ```
 firmware/3\_sensors/3\_sensors.ino   ESP8266 firmware (500 Hz, 3 sensors, tolerates a dead sensor)
-python/live\_rls.py                 live heart rate with motion cancellation
-python/live\_debug.py               live view of every signal and what is subtracted
+python/live\_scg.py                 live heart rate: SCG autocorrelation + HMM tracker (recommended)
+python/live\_debug.py               live view of every signal and what RLS subtracts (uses live\_scg.py)
+python/live\_rls.py                 previous version (5-25 Hz autocorrelation + rule-based tracker)
+raw\_data from accelerometers/      5 min recordings; \*\_merged.csv include the Polar H10 heart rate
 requirements.txt                   Python packages
 ```
 
@@ -64,17 +74,30 @@ Lines starting with `#` are status messages.
 ```
 py -m pip install -r requirements.txt
 cd python
-py live\_rls.py
+py live\_scg.py
 ```
 
 * Close the Arduino Serial Monitor first, only one program can use the COM port.
-* Set `PORT` (default `COM5`) and `BAUD` (default `921600`) at the top of `live\_rls.py`.
-* Replay a recording: `py live\_rls.py log\_rls\_YYYYMMDD\_HHMMSS.csv` (prints heart rate once per second).
-* `py live\_debug.py` shows five panels: chest raw vs the estimate being subtracted, the result, device axes, back axes, and the motion gate. Needs `live\_rls.py` in the same folder.
+* Set `PORT` (default `COM5`) and `BAUD` (default `921600`) at the top of `live\_scg.py`.
+* Set which sensor is on the chest: `CHEST\_SENSOR\_INDEX` and `REF\_SENSOR\_INDICES` (C=0, D=1, B=2). This only changes the RAW/CLEAN plot; the heart rate uses all 9 axes.
+* Replay a log: `py live\_scg.py log\_scg\_YYYYMMDD\_HHMMSS.csv` (prints heart rate once per second).
+* Replay a merged recording and compare with the Polar: `py live\_scg.py "../raw\_data from accelerometers/walking\_5min\_merged.csv"`.
+* `py live\_debug.py` shows five panels: chest raw vs the estimate RLS subtracts, the result, both reference sensors, and the motion gate. Needs `live\_scg.py` in the same folder.
 
 Every live run writes a timestamped `log\_\*.csv` with the raw stream.
 
-## How it works
+## How it works (`live\_scg.py`)
+
+Heart rate:
+
+1. **Band-pass 20-60 Hz** on all 9 axes. Below about 20 Hz the footsteps dominate; the valve "click" of the heartbeat has a lot of energy above that. This change alone took walking from 25 to about 6.5 bpm error.
+2. **Beat envelope** (60 ms RMS, 100 Hz) and its **autocorrelation** over a 10 s window, for every axis of every working sensor, averaged. All three sensors pick up the heartbeat (checked on the sitting/standing recordings), so they are added, not subtracted.
+3. **Score for every rate 40-150 bpm**: 0.75 x autocorrelation at the beat period + 0.25 x at twice the period.
+4. **HMM tracker**: once a second the probability over rates is spread a little (the rate may drift about 1 bpm/s) and multiplied by the new score. Footstep peaks jump around, the heartbeat stays put, so it accumulates. Status `locked` = at least half of the probability within 3 bpm, otherwise `\~NN BPM (niska pewność)`.
+
+The RLS canceller (below) is still there, but only for the RAW/CLEAN plot and `live\_debug.py`: subtracting the references also subtracts the heartbeat they contain.
+
+## How the previous version works (`live\_rls.py`)
 
 1. **Band-pass 5-25 Hz** (4th-order Butterworth) on every channel keeps the heartbeat vibration and drops slow body motion.
 2. **Motion gate**: the filter only learns and subtracts while the reference sensors show motion above an adaptive threshold (2.5x their own quiet level). At rest the output is the raw signal, so the filter cannot learn to remove the heartbeat that leaks into the references.
@@ -86,6 +109,17 @@ Every live run writes a timestamped `log\_\*.csv` with the raw stream.
 On-screen status: `locked`, `holding`, `\~NN bpm (low confidence)`, or `--`.
 
 ## Tuning
+
+At the top of `live\_scg.py`:
+
+|Setting|Meaning|
+|-|-|
+|`HR\_BAND`|band used for the heart rate (20-60 Hz)|
+|`HR\_WINDOW\_SECONDS`|autocorrelation window|
+|`TRACK\_SIGMA\_BPM`|how fast the rate may change per second; raise it if the reading lags behind real changes|
+|`TRACK\_BETA`|how much one window is trusted; lower = smoother, higher = jumpier|
+|`LOCK\_MASS`|confidence needed for `locked`|
+|`MOVE\_RMS`|minimum reference RMS counted as motion (RLS / plot only)|
 
 At the top of `live\_rls.py`:
 
