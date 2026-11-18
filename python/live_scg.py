@@ -4,10 +4,10 @@ live_scg.py — estymacja HR z akcelerometrów metodą SCG + autokorelacja + tra
 Format strumienia:
 t,cx,cy,cz,dx,dy,dz,bx,by,bz
 
-Domyślne mapowanie zgodne z opisem live_fft.py:
-C (sensor 1) = palec / referencja ruchu
-D (sensor 2) = przód klatki piersiowej / sygnał SCG
-B (sensor 3) = kanał silikonowy / referencja ruchu
+Mapowanie sensorów jak w repo (README, firmware 3_sensors.ino):
+C (kolumny cx,cy,cz) = klatka piersiowa / sygnał SCG
+D (kolumny dx,dy,dz) = urządzenie / referencja ruchu
+B (kolumny bx,by,bz) = plecy / referencja ruchu
 
 UWAGA:
 Jeżeli firmware ma inną kolejność sensorów, zmień CHEST_SENSOR_INDEX
@@ -55,10 +55,10 @@ PORT = "COM5"
 BAUD = 921600
 FS = 500
 
-# Mapowanie sensorów w strumieniu: C=0, D=1, B=2.
-# Domyślnie zgodnie z komentarzem w przesłanym live_fft.py.
-CHEST_SENSOR_INDEX = 1
-REF_SENSOR_INDICES = (0, 2)
+# Mapowanie sensorów w strumieniu: C=0, D=1, B=2 (jak w README i firmware).
+CHEST_SENSOR_INDEX = 0
+REF_SENSOR_INDICES = (1, 2)
+SENSOR_NAMES = ("klatka (C)", "urządzenie (D)", "plecy (B)")
 
 BPM_MIN = 40
 BPM_MAX = 150
@@ -558,6 +558,19 @@ class SCGProcessor:
         x = np.arange(len(raw)) / float(FS)
         return x, raw, clean
 
+    def hr_plot_data(self):
+        """
+        Sygnał, z którego naprawdę liczone jest HR: oś Z klatki w paśmie 20–60 Hz
+        oraz jego obwiednia energii (RMS 60 ms) — ostatnie PLOT_SECONDS sekund.
+        """
+        n = min(self.hr_filled, PLOT_N)
+        if n == 0:
+            return np.array([]), np.array([]), np.array([])
+        signal = self.hr_buffer[-n:, CHEST_SENSOR_INDEX * 3 + 2]
+        envelope = np.sqrt(moving_average(signal * signal, int(ENVELOPE_SECONDS * FS)))
+        x = np.arange(n) / float(FS)
+        return x, signal, envelope
+
 
 # ----------------------------- REPLAY LOGU -----------------------------
 
@@ -635,8 +648,8 @@ def replay_log(path):
 def main():
     print(f"Łączenie z {PORT} @ {BAUD}...")
     print(
-        f"Sensor SCG: {CHEST_SENSOR_INDEX} | "
-        f"referencje: {REF_SENSOR_INDICES}"
+        f"Sensor SCG: {SENSOR_NAMES[CHEST_SENSOR_INDEX]} | "
+        f"referencje: {', '.join(SENSOR_NAMES[i] for i in REF_SENSOR_INDICES)}"
     )
 
     try:
@@ -657,12 +670,15 @@ def main():
     byte_buffer = b""
 
     app = QtWidgets.QApplication(sys.argv)
-    win = pg.GraphicsLayoutWidget(title="Clema — SCG: RAW vs RLS CLEAN")
-    win.resize(1200, 760)
+    win = pg.GraphicsLayoutWidget(title="Clema — SCG: sygnał i HR")
+    win.resize(1200, 900)
     win.show()
 
     header = win.addLabel("Oczekiwanie na dane...", row=0, col=0, colspan=2)
-    plot = win.addPlot(row=1, col=0, colspan=2, title="SCG — oś Z")
+    plot = win.addPlot(
+        row=1, col=0, colspan=2,
+        title=f"1  {SENSOR_NAMES[CHEST_SENSOR_INDEX]}, oś Z, 5–25 Hz: RAW i CLEAN po RLS (tylko podgląd)"
+    )
     plot.setLabel("bottom", "Czas w oknie", units="s")
     plot.setLabel("left", "Przyspieszenie filtrowane", units="m/s²")
     plot.showGrid(x=True, y=True, alpha=0.25)
@@ -673,8 +689,19 @@ def main():
     raw_curve.setPen(pg.mkPen((220, 180, 0), width=1), name="RAW")
     clean_curve.setPen(pg.mkPen((0, 220, 100), width=1.5), name="CLEAN (RLS)")
 
-    details = win.addLabel("", row=2, col=0, colspan=2)
-    log_label = win.addLabel(f"Log: {log_name}", row=3, col=0, colspan=2)
+    hr_plot = win.addPlot(
+        row=2, col=0, colspan=2,
+        title=f"2  Z tego liczone jest HR: {SENSOR_NAMES[CHEST_SENSOR_INDEX]}, oś Z, 20–60 Hz "
+              f"(szary) i obwiednia energii (czerwona) — HR to rytm garbów obwiedni"
+    )
+    hr_plot.setLabel("bottom", "Czas w oknie", units="s")
+    hr_plot.setLabel("left", "Przyspieszenie filtrowane", units="m/s²")
+    hr_plot.showGrid(x=True, y=True, alpha=0.25)
+    hr_signal_curve = hr_plot.plot(pen=pg.mkPen((150, 150, 150), width=1))
+    hr_envelope_curve = hr_plot.plot(pen=pg.mkPen((255, 70, 70), width=2))
+
+    details = win.addLabel("", row=3, col=0, colspan=2)
+    log_label = win.addLabel(f"Log: {log_name}", row=4, col=0, colspan=2)
 
     rate_count = 0
     rate_start = time.monotonic()
@@ -706,6 +733,11 @@ def main():
             raw_curve.setData(x, raw)
             clean_curve.setData(x, clean)
 
+        hx, hr_signal, hr_envelope = processor.hr_plot_data()
+        if len(hx):
+            hr_signal_curve.setData(hx, hr_signal)
+            hr_envelope_curve.setData(hx, hr_envelope)
+
         if result is None:
             if processor.hr_filled < HR_WINDOW_N:
                 header.setText(
@@ -724,9 +756,10 @@ def main():
             details.setText(
                 f"Stan: {'RUCH' if processor.moving else 'SPOKÓJ'} | "
                 f"Kadencja: {cadence_text} (siła {cadence_strength:.2f}) | "
-                f"C: {'ON' if processor.sensor_alive[0] else 'OFF'} | "
-                f"D: {'ON' if processor.sensor_alive[1] else 'OFF'} | "
-                f"B: {'ON' if processor.sensor_alive[2] else 'OFF'} | "
+                + "".join(
+                    f"{SENSOR_NAMES[i]}: {'ON' if processor.sensor_alive[i] else 'OFF'} | "
+                    for i in range(3)
+                ) +
                 f"Transmisja: {sample_rate:.0f} próbek/s"
             )
 
