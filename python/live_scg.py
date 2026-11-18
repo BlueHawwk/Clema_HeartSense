@@ -1,37 +1,38 @@
 """
 live_scg.py — estymacja HR z akcelerometrów metodą SCG + autokorelacja + tracker HMM.
 
-Format strumienia:
-t,cx,cy,cz,dx,dy,dz,bx,by,bz
+Format strumienia (wykrywany automatycznie po liczbie pól w linii):
+  3 sensory (10 pól): t,cx,cy,cz,dx,dy,dz,bx,by,bz
+  4 sensory (13 pól): t,c1x,c1y,c1z,c2x,c2y,c2z,dx,dy,dz,bx,by,bz
 
-Mapowanie sensorów jak w repo (README, firmware 3_sensors.ino):
-C (kolumny cx,cy,cz) = klatka piersiowa / sygnał SCG
-D (kolumny dx,dy,dz) = urządzenie / referencja ruchu
-B (kolumny bx,by,bz) = plecy / referencja ruchu
-
-UWAGA:
-Jeżeli firmware ma inną kolejność sensorów, zmień CHEST_SENSOR_INDEX
-i REF_SENSOR_INDICES poniżej. Indeksy: C=0, D=1, B=2.
+Sensory:
+  3 sensory: C = klatka piersiowa, D = urządzenie, B = plecy (README, firmware 3_sensors.ino)
+  4 sensory: C1, C2, D = urządzenie, B = plecy (kolejność kolumn jak w nagraniu
+             walking_realtime_with_polar.csv)
 
 Algorytm:
-1. Filtr 5–25 Hz + RLS (Recursive Least Squares) usuwa ruch z osi sensora SCG,
-   z pozostałymi dwoma akcelerometrami jako referencją. Wynik RLS służy TYLKO
-   do wykresu RAW vs CLEAN.
-2. HR liczone jest osobno, z pasma 20–60 Hz. Poniżej ~20 Hz dominują uderzenia
-   stóp, a klik zastawek serca ma dużo energii wyżej.
-3. Obwiednia energii (RMS 60 ms) i jej autokorelacja — dla KAŻDEJ z 9 osi
-   (wszystkie trzy sensory widzą bicie serca), autokorelacje są uśredniane.
-   Nie odejmujemy referencji od sygnału HR, bo referencje też zawierają serce.
-4. Wynik autokorelacji dla każdego tempa 40–150 BPM:
-   0.75 * ac(okres) + 0.25 * ac(2 * okres), jak w oryginalnym kandydacie.
-5. Tracker HMM (filtr probabilistyczny): co sekundę rozkład prawdopodobieństwa
-   tętna jest lekko rozmywany (tętno zmienia się powoli) i mnożony przez nowy
-   wynik autokorelacji. Piki od kroków skaczą, serce stoi — więc serce wygrywa.
+1. Filtr 5–25 Hz + RLS usuwa ruch z osi sensora CHEST_SENSOR_INDEX (C / C1),
+   pozostałe sensory są referencją. Wynik RLS służy TYLKO do wykresu RAW vs CLEAN.
+2. HR liczone jest z pasma 20–60 Hz. Poniżej ~20 Hz dominują uderzenia stóp,
+   a klik zastawek serca ma dużo energii wyżej.
+3. 4 sensory: od każdej osi C2, D i B odejmowany jest C1 (najmniejsze kwadraty,
+   8 opóźnień, w każdym 10-sekundowym oknie). C1 bierze się bez zmian.
+   Na nagraniu z chodzeniem to najlepszy wariant (patrz niżej). Przy odwrotnym
+   układzie (C2 odejmowany od reszty) poprawy prawie nie ma.
+   3 sensory: bez odejmowania (na nagraniach z repo odejmowanie nic nie dawało,
+   bo wszystkie trzy sensory widzą serce).
+4. Obwiednia energii (RMS 60 ms) i jej autokorelacja dla każdej osi działających
+   sensorów, autokorelacje są uśredniane. Wynik dla każdego tempa 40–150 BPM:
+   0.75 * ac(okres) + 0.25 * ac(2 * okres).
+5. Tracker HMM: co sekundę rozkład prawdopodobieństwa tętna jest lekko rozmywany
+   (tętno zmienia się powoli) i mnożony przez nowy wynik autokorelacji.
+   Piki od kroków skaczą, serce stoi — więc serce wygrywa.
 
-Wyniki na nagraniach z repo (raw_data, porównanie z Polar H10, odtwarzanie
-tym plikiem):
-  chodzenie: średni błąd ~3 BPM (wcześniej ~25 BPM — łapał rytm kroków ~50/min)
-  siedzenie / stanie: ~1.5 BPM
+Wyniki (odtwarzanie tym plikiem, porównanie co sekundę z Polar H10):
+  4 sensory, chodzenie ~15 min: patrz README (sekcja Status).
+  3 sensory (nagrania z repo): chodzenie 3.3 BPM, siedzenie 1.5, stanie 1.7.
+  Najsłabszy moment to start: przez pierwsze ~15–25 s wynik bywa zaczepiony
+  o rytm kroków (~55–60/min).
 
 To prototyp badawczy, nie urządzenie medyczne. Wynik BPM wymaga walidacji
 z niezależnym pomiarem referencyjnym (np. ECG/pas piersiowy).
@@ -55,10 +56,20 @@ PORT = "COM7"
 BAUD = 921600
 FS = 500
 
-# Mapowanie sensorów w strumieniu: C=0, D=1, B=2 (jak w README i firmware).
-CHEST_SENSOR_INDEX = 0
-REF_SENSOR_INDICES = (1, 2)
-SENSOR_NAMES = ("klatka (C)", "urządzenie (D)", "plecy (B)")
+# Sensory. Liczba sensorów (3 lub 4) jest wykrywana z długości linii strumienia.
+SENSOR_NAMES_3 = ("klatka C", "urządzenie D", "plecy B")
+SENSOR_NAMES_4 = ("C1", "C2", "urządzenie D", "plecy B")
+SENSOR_NAMES = SENSOR_NAMES_3          # zgodność wstecz
+CHEST_SENSOR_INDEX = 0                 # sensor na wykresie i czyszczony przez RLS (C / C1)
+REF_SENSOR_INDICES = (1, 2)            # tylko dla 3 sensorów; przy 4 = wszystkie poza CHEST
+
+# Odniesienie ruchu dla HR: ten sensor jest odejmowany od pozostałych (20–60 Hz).
+HR_NOISE_REF_3 = None                  # 3 sensory: bez odejmowania
+HR_NOISE_REF_4 = 0                     # 4 sensory: C1 odejmowany od C2, D, B
+HR_CANCEL_TAPS = 8                     # opóźnienia w odejmowaniu (próbki)
+
+# Przerwa w znacznikach czasu, po której odtwarzanie zaczyna od nowa
+GAP_RESET_SECONDS = 1.0
 
 BPM_MIN = 40
 BPM_MAX = 150
@@ -147,7 +158,7 @@ def parse_lines(buffer):
         if not line or line.startswith(b"#"):
             continue
         fields = line.split(b",")
-        if len(fields) != 10:
+        if len(fields) not in (10, 13):          # 3 lub 4 sensory
             continue
         try:
             rows.append([float(v) for v in fields])
@@ -212,6 +223,20 @@ def autocorrelation_score(ac, bpm_grid):
         0.0,
     )
     return (1.0 - TWICE_LAG_WEIGHT) * s1 + TWICE_LAG_WEIGHT * np.maximum(s2, 0.0)
+
+
+def cancel_reference(x, ref, taps=HR_CANCEL_TAPS):
+    """
+    Odejmuje od sygnału x (n,) tę część, którą da się przewidzieć z sensora
+    odniesienia ref (n, 3) i jego ostatnich `taps` próbek (najmniejsze kwadraty
+    w bieżącym oknie). Zostaje to, czego odniesienie nie widzi.
+    """
+    A = np.hstack([np.roll(ref, k, axis=0) for k in range(taps)])[taps:]
+    y = x[taps:]
+    beta, *_ = np.linalg.lstsq(A, y, rcond=None)
+    out = np.array(x, dtype=float, copy=True)
+    out[taps:] = y - A @ beta
+    return out
 
 
 # ----------------------------- KADENCJA -----------------------------
@@ -317,14 +342,10 @@ class SCGProcessor:
         self.scg_zi = None
         self.motion_zi = None
 
-        self.last_raw = np.zeros(9, dtype=float)
+        self.n_sensors = None          # 3 lub 4, ustalane z pierwszej paczki danych
+        self.sensor_names = SENSOR_NAMES_3
         self.sensor_alive = np.zeros(3, dtype=bool)
-
-        self.ref_count = 6
-        self.rls_dim = self.ref_count * TAPS
-        self.P = np.eye(self.rls_dim) * RLS_INITIAL_P
-        self.W = np.zeros((3, self.rls_dim), dtype=float)
-        self.ref_history = np.zeros((TAPS, self.ref_count), dtype=float)
+        self.noise_ref = None
 
         self.motion_energy = 0.0
         self.motion_baseline = deque(maxlen=600)
@@ -342,30 +363,64 @@ class SCGProcessor:
 
         self.raw_buffer = np.zeros((WINDOW_N, 3))
         self.clean_buffer = np.zeros((WINDOW_N, 3))
-        self.low_buffer = np.zeros((WINDOW_N, 6))
         self.filled = 0
-
-        self.hr_zi = None
-        self.hr_buffer = np.zeros((HR_WINDOW_N, 9))   # 20–60 Hz, wszystkie 9 osi
         self.hr_filled = 0
+
         self.tracker = HRTracker()
         self.cadence = (None, 0.0)
 
         self.last_estimate_time = 0.0
         self.hr_state = (None, "unreliable", 0.0)
 
+    def _setup(self, n_sensors):
+        """Rozmiary buforów i RLS zależą od liczby sensorów (3 lub 4)."""
+        self.n_sensors = n_sensors
+        self.n_axes = 3 * n_sensors
+        self.sensor_names = SENSOR_NAMES_4 if n_sensors == 4 else SENSOR_NAMES_3
+        self.chest_sensor = CHEST_SENSOR_INDEX
+        if n_sensors == 3:
+            self.ref_sensors = tuple(REF_SENSOR_INDICES)
+        else:
+            self.ref_sensors = tuple(s for s in range(n_sensors) if s != self.chest_sensor)
+        self.noise_ref = HR_NOISE_REF_4 if n_sensors == 4 else HR_NOISE_REF_3
+
+        self.last_raw = np.zeros(self.n_axes, dtype=float)
+        self.sensor_alive = np.zeros(n_sensors, dtype=bool)
+
+        self.ref_count = 3 * len(self.ref_sensors)
+        self.rls_dim = self.ref_count * TAPS
+        self.P = np.eye(self.rls_dim) * RLS_INITIAL_P
+        self.W = np.zeros((3, self.rls_dim), dtype=float)
+        self.ref_history = np.zeros((TAPS, self.ref_count), dtype=float)
+
+        self.low_buffer = np.zeros((WINDOW_N, self.ref_count))
+        self.hr_buffer = np.zeros((HR_WINDOW_N, self.n_axes))   # 20–60 Hz, wszystkie osie
+
     def push(self, rows):
-        """Przetwarza paczkę wierszy; zwraca sygnały RAW i CLEAN."""
+        """Przetwarza paczkę wierszy (t + 9 lub t + 12 wartości); zwraca sygnały RAW i CLEAN."""
+        if not isinstance(rows, np.ndarray):
+            rows = list(rows)
+            if not rows:
+                return np.empty((0, 3)), np.empty((0, 3))
+            width = len(rows[0]) if self.n_sensors is None else 1 + 3 * self.n_sensors
+            rows = [r for r in rows if len(r) == width]    # pomiń linie w innym formacie
+            if not rows:
+                return np.empty((0, 3)), np.empty((0, 3))
         x = np.asarray(rows, dtype=float)
-        if x.ndim != 2 or x.shape[1] != 10 or len(x) == 0:
+        if x.ndim != 2 or x.shape[1] not in (10, 13) or len(x) == 0:
+            return np.empty((0, 3)), np.empty((0, 3))
+        if self.n_sensors is None:
+            self._setup((x.shape[1] - 1) // 3)
+        if x.shape[1] != 1 + self.n_axes:
             return np.empty((0, 3)), np.empty((0, 3))
 
-        # Kolumny 1..9 to XYZ trzech sensorów; kolumna 0 to timestamp.
-        xyz = x[:, 1:10].copy()
+        # Kolumna 0 to timestamp, dalej XYZ kolejnych sensorów.
+        xyz = x[:, 1:].copy()
+        n_sensors = self.n_sensors
 
         # Zachowaj ostatnią poprawną próbkę, gdy sensor chwilowo wysyła same zera.
         for i in range(len(xyz)):
-            for sensor in range(3):
+            for sensor in range(n_sensors):
                 sl = slice(sensor * 3, sensor * 3 + 3)
                 if np.any(xyz[i, sl] != 0):
                     self.last_raw[sl] = xyz[i, sl]
@@ -373,13 +428,13 @@ class SCGProcessor:
                 else:
                     xyz[i, sl] = self.last_raw[sl]
 
-        for sensor in range(3):
+        for sensor in range(n_sensors):
             if not np.any(self.last_raw[sensor * 3:sensor * 3 + 3]):
                 self.sensor_alive[sensor] = False
 
         if not self.started:
             self.scg_zi = init_filter_state(SCG_SOS, xyz[0])
-            ref_cols0 = [c for s in REF_SENSOR_INDICES for c in range(3 * s, 3 * s + 3)]
+            ref_cols0 = [c for s in self.ref_sensors for c in range(3 * s, 3 * s + 3)]
             self.motion_zi = init_filter_state(MOTION_SOS, xyz[0, ref_cols0])
             self.hr_zi = init_filter_state(HR_SOS, xyz[0])
             self.started = True
@@ -389,7 +444,7 @@ class SCGProcessor:
             SCG_SOS, xyz, axis=0, zi=self.scg_zi
         )
 
-        # Pasmo 20–60 Hz na wszystkich 9 osiach — z tego liczone jest HR.
+        # Pasmo 20–60 Hz na wszystkich osiach — z tego liczone jest HR.
         hr_band, self.hr_zi = sosfilt(HR_SOS, xyz, axis=0, zi=self.hr_zi)
         m = min(len(hr_band), HR_WINDOW_N)
         self.hr_buffer = np.roll(self.hr_buffer, -m, axis=0)
@@ -398,7 +453,7 @@ class SCGProcessor:
 
         # Filtr niskopasmowy referencji do wykrywania kadencji.
         ref_columns = []
-        for sensor_index in REF_SENSOR_INDICES:
+        for sensor_index in self.ref_sensors:
             ref_columns.extend(range(sensor_index * 3, sensor_index * 3 + 3))
         ref_raw = xyz[:, ref_columns]
         low, self.motion_zi = sosfilt(
@@ -406,14 +461,14 @@ class SCGProcessor:
         )
 
         chest_columns = list(
-            range(CHEST_SENSOR_INDEX * 3, CHEST_SENSOR_INDEX * 3 + 3)
+            range(self.chest_sensor * 3, self.chest_sensor * 3 + 3)
         )
         chest = hp[:, chest_columns]
         refs = hp[:, ref_columns]
 
         # Wyłącz referencję, jeśli dany sensor nie dostarczył żadnych danych.
         ref_alive = np.array(
-            [self.sensor_alive[idx] for idx in REF_SENSOR_INDICES],
+            [self.sensor_alive[idx] for idx in self.ref_sensors],
             dtype=bool
         )
         ref_mask = np.repeat(ref_alive, 3).astype(float)
@@ -510,13 +565,29 @@ class SCGProcessor:
         self.filled = min(self.filled + n, WINDOW_N)
 
     def _hr_score(self):
-        """Uśredniona autokorelacja obwiedni z osi działających sensorów -> wynik na siatce BPM."""
+        """
+        Uśredniona autokorelacja obwiedni z osi działających sensorów -> wynik na siatce BPM.
+        Jeśli ustawione jest odniesienie ruchu (4 sensory: C1), jest ono odejmowane
+        od osi pozostałych sensorów, a samo wchodzi bez zmian.
+        """
+        ref = self.noise_ref
+        ref_signal = None
+        if ref is not None and self.sensor_alive[ref]:
+            ref_signal = self.hr_buffer[:, 3 * ref:3 * ref + 3]
+            if np.std(ref_signal) < 1e-9:
+                ref_signal = None
+
         autocorrelations = []
-        for sensor in range(3):
+        for sensor in range(self.n_sensors):
             if not self.sensor_alive[sensor]:
                 continue
             for axis in range(3):
-                ac = beat_autocorrelation(self.hr_buffer[:, sensor * 3 + axis])
+                x = self.hr_buffer[:, sensor * 3 + axis]
+                if np.std(x) < 1e-9:                     # sensor chwilowo stoi (same zera)
+                    continue
+                if ref_signal is not None and sensor != ref:
+                    x = cancel_reference(x, ref_signal)
+                ac = beat_autocorrelation(x)
                 if ac is not None:
                     autocorrelations.append(ac)
         if not autocorrelations:
@@ -534,10 +605,10 @@ class SCGProcessor:
             return None
 
         self.last_estimate_time = now
-        if self.hr_filled < HR_WINDOW_N:
+        if self.n_sensors is None or self.hr_filled < HR_WINDOW_N:
             return None
 
-        if any(self.sensor_alive[idx] for idx in REF_SENSOR_INDICES) and self.filled >= 6 * FS:
+        if any(self.sensor_alive[idx] for idx in self.ref_sensors) and self.filled >= 6 * FS:
             self.cadence = estimate_cadence(self.low_buffer[-self.filled:])
         else:
             self.cadence = (None, 0.0)
@@ -564,9 +635,9 @@ class SCGProcessor:
         oraz jego obwiednia energii (RMS 60 ms) — ostatnie PLOT_SECONDS sekund.
         """
         n = min(self.hr_filled, PLOT_N)
-        if n == 0:
+        if n == 0 or self.n_sensors is None:
             return np.array([]), np.array([]), np.array([])
-        signal = self.hr_buffer[-n:, CHEST_SENSOR_INDEX * 3 + 2]
+        signal = self.hr_buffer[-n:, self.chest_sensor * 3 + 2]
         envelope = np.sqrt(moving_average(signal * signal, int(ENVELOPE_SECONDS * FS)))
         x = np.arange(n) / float(FS)
         return x, signal, envelope
@@ -576,9 +647,12 @@ class SCGProcessor:
 
 def load_log(path):
     """
-    Wczytuje surowy log z portu (t,cx,...,bz, bez nagłówka; linie '#' pomijane)
-    albo nagranie z nagłówkiem (t_us/t_s, cx..bz, opcjonalnie polar_bpm).
-    Zwraca (dane (n, 10), polar albo None).
+    Wczytuje:
+      - surowy log z portu (t + 9 lub t + 12 wartości, bez nagłówka; linie '#' pomijane),
+      - nagranie z nagłówkiem: cx..bz (3 sensory) albo c1x..bz (4 sensory),
+        opcjonalnie polar_bpm i kolumna czasu sec / t_s / t_us.
+    Zwraca (dane (n, 10 lub 13), polar albo None, indeksy początków odcinków).
+    Nowy odcinek zaczyna się po przerwie w czasie > GAP_RESET_SECONDS.
     """
     import pandas as pd
 
@@ -589,49 +663,77 @@ def load_log(path):
                 break
 
     if first.split(",")[0].strip().replace("_", "").isalpha():
-        cols = ["cx", "cy", "cz", "dx", "dy", "dz", "bx", "by", "bz"]
         d = pd.read_csv(path, low_memory=False)
-        for c in cols + ["polar_bpm"]:
+        if "c1x" in d:
+            cols = ["c1x", "c1y", "c1z", "c2x", "c2y", "c2z",
+                    "dx", "dy", "dz", "bx", "by", "bz"]
+        else:
+            cols = ["cx", "cy", "cz", "dx", "dy", "dz", "bx", "by", "bz"]
+        for c in cols + ["polar_bpm", "sec", "t_s", "t_us"]:
             if c in d:
                 d[c] = pd.to_numeric(d[c], errors="coerce")
-        d = d.dropna(subset=cols)
-        t = d["t_us"].values if "t_us" in d else np.arange(len(d)) * 1e6 / FS
-        data = np.column_stack([t, d[cols].values]).astype(float)
+        d = d.dropna(subset=cols).reset_index(drop=True)
+        if "sec" in d:
+            t = d["sec"].values
+        elif "t_s" in d:
+            t = d["t_s"].values
+        elif "t_us" in d:
+            t = d["t_us"].values / 1e6
+        else:
+            t = np.arange(len(d)) / FS
+        data = np.column_stack([t * 1e6, d[cols].values]).astype(float)
         polar = None
         if "polar_bpm" in d and d["polar_bpm"].notna().any():
-            polar = d["polar_bpm"].ffill().values
-        return data, polar
+            polar = d["polar_bpm"].ffill().bfill().values
+    else:
+        with open(path, "rb") as f:
+            rows, _ = parse_lines(f.read() + b"\n")
+        if not rows:
+            return np.empty((0, 10)), None, [0]
+        widths = [len(r) for r in rows]
+        width = max(set(widths), key=widths.count)           # dominujący format
+        data = np.array([r for r in rows if len(r) == width], dtype=float)
+        t = data[:, 0] / 1e6
+        polar = None
 
-    with open(path, "rb") as f:
-        rows, _ = parse_lines(f.read() + b"\n")
-    return np.array(rows, dtype=float), None
+    dt = np.diff(t)
+    starts = [0] + [int(i) + 1 for i in np.where((dt > GAP_RESET_SECONDS) | (dt < 0))[0]]
+    return data, polar, starts
 
 
 def replay_log(path):
-    data, polar = load_log(path)
-    if data.ndim != 2 or data.shape[1] != 10:
-        print("Log musi zawierać 10 kolumn: timestamp + 9 osi.")
+    data, polar, starts = load_log(path)
+    if data.ndim != 2 or data.shape[1] not in (10, 13) or len(data) == 0:
+        print("Log musi zawierać 10 kolumn (t + 3 sensory) albo 13 (t + 4 sensory).")
         return
 
-    processor = SCGProcessor()
+    n_sensors = (data.shape[1] - 1) // 3
+    print(f"Sensory: {n_sensors}, odcinków nagrania: {len(starts)}")
     chunk_size = FS
     errors = []
+    bounds = list(starts) + [len(data)]
+    elapsed = 0.0
 
-    for start in range(0, len(data) - chunk_size + 1, chunk_size):
-        processor.push(data[start:start + chunk_size])
-        state = processor.estimate(force=True)
-        if state:
-            line = (
-                f"{(start + chunk_size) / FS:6.1f}s | "
-                f"HR: {format_hr(state):32s} | "
-                f"{'RUCH  ' if processor.moving else 'SPOKÓJ'}"
-            )
-            if polar is not None:
-                ref = polar[start + chunk_size - 1]
-                line += f" | Polar: {ref:4.0f}"
-                if state[0] is not None:
-                    errors.append((abs(state[0] - ref), state[1] == "locked"))
-            print(line)
+    for seg_start, seg_end in zip(bounds[:-1], bounds[1:]):
+        if seg_start > 0:
+            print("--- przerwa w zapisie: start od nowa ---")
+        processor = SCGProcessor()
+        for start in range(seg_start, seg_end - chunk_size + 1, chunk_size):
+            processor.push(data[start:start + chunk_size])
+            elapsed += chunk_size / FS
+            state = processor.estimate(force=True)
+            if state:
+                line = (
+                    f"{elapsed:7.1f}s | "
+                    f"HR: {format_hr(state):32s} | "
+                    f"{'RUCH  ' if processor.moving else 'SPOKÓJ'}"
+                )
+                if polar is not None:
+                    ref = polar[start + chunk_size - 1]
+                    line += f" | Polar: {ref:4.0f}"
+                    if state[0] is not None:
+                        errors.append((abs(state[0] - ref), state[1] == "locked"))
+                print(line)
 
     if errors:
         e = np.array([x[0] for x in errors])
@@ -647,10 +749,7 @@ def replay_log(path):
 
 def main():
     print(f"Łączenie z {PORT} @ {BAUD}...")
-    print(
-        f"Sensor SCG: {SENSOR_NAMES[CHEST_SENSOR_INDEX]} | "
-        f"referencje: {', '.join(SENSOR_NAMES[i] for i in REF_SENSOR_INDICES)}"
-    )
+    print("Liczba sensorów (3 lub 4) zostanie wykryta z danych.")
 
     try:
         ser = serial.Serial(PORT, BAUD, timeout=0.01)
@@ -677,7 +776,7 @@ def main():
     header = win.addLabel("Oczekiwanie na dane...", row=0, col=0, colspan=2)
     plot = win.addPlot(
         row=1, col=0, colspan=2,
-        title=f"1  {SENSOR_NAMES[CHEST_SENSOR_INDEX]}, oś Z, 5–25 Hz: RAW i CLEAN po RLS (tylko podgląd)"
+        title="1  Sensor C / C1, oś Z, 5–25 Hz: RAW i CLEAN po RLS (tylko podgląd)"
     )
     plot.setLabel("bottom", "Czas w oknie", units="s")
     plot.setLabel("left", "Przyspieszenie filtrowane", units="m/s²")
@@ -691,8 +790,8 @@ def main():
 
     hr_plot = win.addPlot(
         row=2, col=0, colspan=2,
-        title=f"2  Z tego liczone jest HR: {SENSOR_NAMES[CHEST_SENSOR_INDEX]}, oś Z, 20–60 Hz "
-              f"(szary) i obwiednia energii (czerwona) — HR to rytm garbów obwiedni"
+        title="2  Z tego liczone jest HR: sensor C / C1, oś Z, 20–60 Hz "
+              "(szary) i obwiednia energii (czerwona) — HR to rytm garbów obwiedni"
     )
     hr_plot.setLabel("bottom", "Czas w oknie", units="s")
     hr_plot.setLabel("left", "Przyspieszenie filtrowane", units="m/s²")
@@ -757,9 +856,11 @@ def main():
                 f"Stan: {'RUCH' if processor.moving else 'SPOKÓJ'} | "
                 f"Kadencja: {cadence_text} (siła {cadence_strength:.2f}) | "
                 + "".join(
-                    f"{SENSOR_NAMES[i]}: {'ON' if processor.sensor_alive[i] else 'OFF'} | "
-                    for i in range(3)
+                    f"{processor.sensor_names[i]}: {'ON' if processor.sensor_alive[i] else 'OFF'} | "
+                    for i in range(processor.n_sensors or 0)
                 ) +
+                (f"odniesienie HR: {processor.sensor_names[processor.noise_ref]} | "
+                 if processor.noise_ref is not None else "") +
                 f"Transmisja: {sample_rate:.0f} próbek/s"
             )
 
